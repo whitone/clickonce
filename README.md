@@ -1,5 +1,5 @@
 [![build status](https://api.travis-ci.com/whitone/clickonce.svg?branch=master)](https://travis-ci.com/github/whitone/clickonce)
-[![license](https://img.shields.io/github/license/whitone/clickonce)](./LICENSE)
+[![license](https://img.shields.io/github/license/whitone/clickonce.svg)](./LICENSE)
 
 # clickonce
 
