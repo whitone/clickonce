@@ -34,7 +34,7 @@ const (
 	// AssemblyDependency indicates a dependency required for the application.
 	AssemblyDependency coType = iota
 
-	// NonassemblyFile indicates a file used by the application.
+	// NonAssemblyFile indicates a file used by the application.
 	NonAssemblyFile
 )
 
