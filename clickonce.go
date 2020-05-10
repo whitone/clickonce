@@ -31,14 +31,14 @@ import (
 type coType int
 
 const (
-	// Assembly dependency that is required for the application.
+	// AssemblyDependency indicates a dependency required for the application.
 	AssemblyDependency coType = iota
 
-	// Nonassembly files used by the application.
+	// NonassemblyFile indicates a file used by the application.
 	NonAssemblyFile
 )
 
-// ClickOnce deployed file.
+// A DeployedFile represents a ClickOnce deployed file.
 type DeployedFile struct {
 	// Deployed file type.
 	Type coType
@@ -55,6 +55,7 @@ type ClickOnce struct {
 	outputDir     string
 	noSuffix      bool
 	offline       bool
+	notFound      int
 	logger        *log.Logger
 }
 
@@ -180,6 +181,45 @@ func (co *ClickOnce) GetAll() error {
 	return nil
 }
 
+// initSubset init subset.
+func (co *ClickOnce) initSubset(subset []string) error {
+	co.subset = make(map[string]bool, len(subset))
+	for _, s := range subset {
+		if s == "" {
+			return errors.New("empty filename is not valid in a subset")
+		}
+		co.subset[s] = false
+	}
+	return nil
+}
+
+// checkDownload verifies that all elements in subset are already downloaded.
+func (co *ClickOnce) checkDownload() {
+	for deployedFilePath := range co.deployedFiles {
+		codebase := strings.Replace(deployedFilePath, "\\", "/", -1)
+		deployedFileName := path.Base(codebase)
+		if _, ok := co.subset[deployedFileName]; ok {
+			co.subset[deployedFileName] = true
+		}
+	}
+}
+
+// findSubset checks if all element in subset are available.
+func (co *ClickOnce) findSubset(subset []string) error {
+	for _, s := range subset {
+		if !co.subset[s] {
+			co.logger.Printf("Requested file '%s' not found\n", s)
+			co.notFound += 1
+		}
+	}
+
+	if co.notFound == len(subset) {
+		return errors.New("none of requested files are found")
+	}
+
+	return nil
+}
+
 // Get download only a subset of all files required or used by ClickOnce application.
 // If subset is nil or empty, all files are downloaded.
 func (co *ClickOnce) Get(subset []string) error {
@@ -187,13 +227,12 @@ func (co *ClickOnce) Get(subset []string) error {
 		return errors.New("clickonce not initialized")
 	}
 
-	if subset != nil && len(subset) != 0 {
-		co.subset = make(map[string]bool, len(subset))
-		for _, s := range subset {
-			if s == "" {
-				return errors.New("empty filename is not valid in a subset")
-			}
-			co.subset[s] = false
+	validSubset := subset != nil && len(subset) != 0
+
+	if validSubset {
+		err := co.initSubset(subset)
+		if err != nil {
+			return err
 		}
 	}
 
@@ -204,29 +243,17 @@ func (co *ClickOnce) Get(subset []string) error {
 		}
 	} else {
 		co.logger.Println("Files already offline, download skipped")
-		for deployedFilePath, _ := range co.deployedFiles {
-			codebase := strings.Replace(deployedFilePath, "\\", "/", -1)
-			deployedFileName := path.Base(codebase)
-			if subset != nil && len(subset) != 0 {
-				if _, ok := co.subset[deployedFileName]; ok {
-					co.subset[deployedFileName] = true
-				}
-			}
+		if validSubset {
+			co.checkDownload()
 		}
 	}
 
-	notFound := 0
+	co.notFound = 0
 
-	if subset != nil && len(subset) != 0 {
-		for _, s := range subset {
-			if !co.subset[s] {
-				co.logger.Printf("Requested file '%s' not found\n", s)
-				notFound += 1
-			}
-		}
-
-		if notFound == len(subset) {
-			return errors.New("none of requested files are found")
+	if validSubset {
+		err := co.findSubset(subset)
+		if err != nil {
+			return err
 		}
 	}
 
@@ -237,11 +264,29 @@ func (co *ClickOnce) Get(subset []string) error {
 		}
 	}
 
-	if subset != nil && len(subset) != 0 && notFound != 0 {
+	if validSubset && co.notFound != 0 {
 		return errors.New("not all or requested files are found")
 	}
 
 	return nil
+}
+
+// remoteFileInfo extract remote file informations from a ClickOnce manifest.
+func (co *ClickOnce) remoteFileInfo(deployedFileUrl *url.URL, deployedFile coBase) (*remoteFile, error) {
+	size, err := strconv.Atoi(deployedFile.Size)
+	if err != nil {
+		return nil, err
+	}
+
+	alg, err := url.Parse(deployedFile.Hash.DigestMethod.Algorithm)
+	if err != nil {
+		return nil, err
+	}
+	algorithm := strings.ToLower(alg.Fragment)
+
+	digest := deployedFile.Hash.DigestValue
+
+	return &remoteFile{deployedFileUrl, size, digest, algorithm}, nil
 }
 
 // retrieveDeployedFile get a deployed file of a ClickOnce application if it's in the requested subset.
@@ -254,7 +299,9 @@ func (co *ClickOnce) retrieveDeployedFile(deployedFilePath string, deployedFile 
 	deployedFilePosixPath := strings.Replace(deployedFilePath, "\\", "/", -1)
 	deployedFileName := path.Base(deployedFilePosixPath)
 
-	if co.subset != nil && !isManifest(deployedFileName) {
+	manifest := isManifest(deployedFileName)
+
+	if co.subset != nil && !manifest {
 		if _, ok := co.subset[deployedFileName]; !ok {
 			co.logger.Printf("'%s' not in requested subset, skipped\n", deployedFileName)
 			return nil
@@ -271,24 +318,14 @@ func (co *ClickOnce) retrieveDeployedFile(deployedFilePath string, deployedFile 
 		return err
 	}
 
-	if deployedFileType == AssemblyDependency && isManifest(deployedFileName) {
+	if deployedFileType == AssemblyDependency && manifest {
 		co.baseUrl = deployedFileUrl
 	}
 
-	size, err := strconv.Atoi(deployedFile.Size)
+	remoteFile, err := co.remoteFileInfo(deployedFileUrl, deployedFile)
 	if err != nil {
 		return err
 	}
-
-	alg, err := url.Parse(deployedFile.Hash.DigestMethod.Algorithm)
-	if err != nil {
-		return err
-	}
-	algorithm := strings.ToLower(alg.Fragment)
-
-	digest := deployedFile.Hash.DigestValue
-
-	remoteFile := remoteFile{deployedFileUrl, size, digest, algorithm}
 
 	deployedFileContent, suffix, err := downloadAndCheck(remoteFile, !co.noSuffix, co.logger)
 	if err != nil {
@@ -312,19 +349,29 @@ func (co *ClickOnce) retrieveDeployedFile(deployedFilePath string, deployedFile 
 		co.subset[deployedFileName] = true
 	}
 
-	if isManifest(deployedFileName) {
-		assembly, err := decodeManifest(deployedFileContent)
-		if err != nil {
-			return err
-		}
-
-		err = co.retrieveAllDeployedFiles(assembly)
+	if manifest {
+		err = co.subApplication(deployedFileContent)
 		if err != nil {
 			return err
 		}
 	}
 
 	return nil
+}
+
+// subApplication decode a manifest and retrieve all deployed files related to a sub application.
+func (co *ClickOnce) subApplication(manifestContent []byte) (err error) {
+	assembly, err := decodeManifest(manifestContent)
+	if err != nil {
+		return
+	}
+
+	err = co.retrieveAllDeployedFiles(assembly)
+	if err != nil {
+		return
+	}
+
+	return
 }
 
 // retrieveAllDeployedFiles get all wanted deployed files of a ClickOnce application.
@@ -388,12 +435,12 @@ func (co *ClickOnce) saveAllDeployedFiles() error {
 	return nil
 }
 
-// isManifest check if a file is a ClickOnce application manifest
+// isManifest check if a file is a ClickOnce application manifest.
 func isManifest(filename string) bool {
 	return path.Ext(filename) == manifestExtension
 }
 
-// decodeManifest decodes a ClickOnce manifest
+// decodeManifest decodes a ClickOnce manifest.
 func decodeManifest(data []byte) (*coAssembly, error) {
 	dec := xml.NewDecoder(bytes.NewBuffer(data))
 	dec.CharsetReader = charset.NewReaderLabel
@@ -407,8 +454,23 @@ func decodeManifest(data []byte) (*coAssembly, error) {
 	return &assembly, nil
 }
 
+// download returns an HTTP response from a URL.
+func download(url string) (res *http.Response, err error) {
+	req, err := http.NewRequest("GET", url, nil)
+	if err != nil {
+		return
+	}
+
+	res, err = http.DefaultClient.Do(req)
+	if err != nil {
+		return
+	}
+
+	return
+}
+
 // downloadAndCheck get a remote file and check size and checksum.
-func downloadAndCheck(file remoteFile, suffix bool, logger *log.Logger) ([]byte, bool, error) {
+func downloadAndCheck(file *remoteFile, suffix bool, logger *log.Logger) ([]byte, bool, error) {
 	filename := filepath.Base(file.url.Path)
 
 	if file.algorithm != "sha1" && file.algorithm != "sha256" {
@@ -423,12 +485,7 @@ func downloadAndCheck(file remoteFile, suffix bool, logger *log.Logger) ([]byte,
 
 	logger.Printf("Downloading '%s' from '%s'\n", filename, downloadUrl)
 
-	req, err := http.NewRequest("GET", downloadUrl, nil)
-	if err != nil {
-		return nil, suffix, err
-	}
-
-	res, err := http.DefaultClient.Do(req)
+	res, err := download(downloadUrl)
 	if err != nil {
 		return nil, suffix, err
 	}
@@ -440,11 +497,7 @@ func downloadAndCheck(file remoteFile, suffix bool, logger *log.Logger) ([]byte,
 
 		logger.Printf("Not found, trying to download '%s' from '%s'\n", filename, downloadUrl)
 
-		req, err := http.NewRequest("GET", downloadUrl, nil)
-		if err != nil {
-			return nil, suffix, err
-		}
-		res, err = http.DefaultClient.Do(req)
+		res, err := download(downloadUrl)
 		if err != nil {
 			return nil, suffix, err
 		}
@@ -468,8 +521,8 @@ func downloadAndCheck(file remoteFile, suffix bool, logger *log.Logger) ([]byte,
 	}
 
 	if file.size != len(body) {
-		return nil, suffix, errors.New(fmt.Sprintf("size mismatch for file '%s': expected %d, got %d",
-			filename, file.size, len(body)))
+		return nil, suffix, fmt.Errorf("size mismatch for file '%s': expected %d, got %d",
+			filename, file.size, len(body))
 	}
 
 	var checksum []byte
@@ -483,7 +536,7 @@ func downloadAndCheck(file remoteFile, suffix bool, logger *log.Logger) ([]byte,
 	}
 
 	if file.digest != base64.StdEncoding.EncodeToString(checksum) {
-		return nil, suffix, errors.New(fmt.Sprintf("digest mismatch for file '%s'", filename))
+		return nil, suffix, fmt.Errorf("digest mismatch for file '%s'", filename)
 	}
 
 	logger.Printf("Downloaded '%s'\n", filename)

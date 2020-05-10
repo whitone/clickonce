@@ -1,4 +1,6 @@
+[![godoc reference](https://img.shields.io/badge/godoc-reference-5272B4)](https://pkg.go.dev/github.com/whitone/clickonce)
 [![build status](https://api.travis-ci.com/whitone/clickonce.svg?branch=master)](https://travis-ci.com/github/whitone/clickonce)
+[![go report card](https://goreportcard.com/badge/github.com/whitone/clickonce)](https://goreportcard.com/report/github.com/whitone/clickonce)
 [![license](https://img.shields.io/github/license/whitone/clickonce.svg)](./LICENSE)
 
 # clickonce
